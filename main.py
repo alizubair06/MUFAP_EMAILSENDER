@@ -16,6 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Dict, List, Tuple
 
+import pytz
 import cloudscraper
 from bs4 import BeautifulSoup
 import openpyxl
@@ -65,23 +66,42 @@ EXACT_HEADERS = [
 # ----------------------------------------------------------------------
 # 1. Cloudscraper Page Fetch
 # ----------------------------------------------------------------------
+from seleniumbase import SB
+
 def fetch_mufap_page(url: str) -> str:
-    logging.info("Fetching MUFAP page via Cloudscraper...")
-    try:
-        scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-        )
-        resp = scraper.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch MUFAP page via cloudscraper: {e}")
+    logging.info("Fetching MUFAP page via SeleniumBase (Undetected Chromedriver)...")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Running headed (will use xvfb in GitHub Actions for full stealth)
+            with SB(uc=True, headless=False) as sb:
+                sb.get(url)
+                # Wait for Cloudflare verification to complete
+                sb.sleep(15)
+                
+                html = sb.get_page_source()
+                if "table" not in html.lower():
+                    raise ValueError("HTML downloaded but no table found. Cloudflare might still be blocking.")
+                
+                return html
+        except Exception as e:
+            logging.warning(f"Attempt {attempt + 1} failed: {e}")
+            if attempt == max_retries - 1:
+                raise RuntimeError(f"Failed to fetch MUFAP page via SeleniumBase after {max_retries} attempts: {e}")
+            import time
+            time.sleep(5)
 
 def extract_report_date(soup: BeautifulSoup) -> str:
     text_content = soup.get_text()
     match = re.search(r"(\d{1,2}[-/ ](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/ ]\d{4})", text_content, re.IGNORECASE)
     if match:
-        return match.group(1).strip()
+        raw_date = match.group(1).strip()
+        raw_date = raw_date.replace("/", "-").replace(" ", "-")
+        parts = raw_date.split("-")
+        if len(parts[0]) == 1:
+            parts[0] = "0" + parts[0]
+        return "-".join(parts).title()
     return datetime.now().strftime("%d-%b-%Y")
 
 # ----------------------------------------------------------------------
@@ -151,19 +171,19 @@ def parse_mufap_table(soup: BeautifulSoup, keyword: str = "AL Habib") -> Tuple[L
 # 3. HTML Email Body (Navy Blue Multi-Column Layout)
 # ----------------------------------------------------------------------
 def build_email_html(data: List[Dict], headers: List[str], report_date: str) -> str:
-    html_table = ["<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 13px; margin-top: 15px;'>"]
+    html_table = ["<table border='0' cellpadding='0' cellspacing='0' style='border-collapse: collapse; width: max-content; min-width: 60%; margin: 15px auto; font-family: \"Segoe UI\", Tahoma, Geneva, Verdana, sans-serif; font-size: 13px;'>"]
     
     html_table.append("  <tr style='background-color: #1a365d; color: white;'>")
     for h in headers:
-        html_table.append(f"    <th style='padding: 8px;'>{str(h).strip()}</th>")
+        html_table.append(f"    <th style='padding: 10px 15px; text-align: center; white-space: nowrap; border: 1px solid #94a3b8;'>{str(h).strip()}</th>")
     html_table.append("  </tr>")
     
-    for row in data:
-        html_table.append("  <tr>")
+    for i, row in enumerate(data):
+        bg_color = "#f8fafc" if i % 2 == 0 else "#ffffff"
+        html_table.append(f"  <tr style='background-color: {bg_color};'>")
         for h in headers:
             val = row.get(h, "-")
-            align = "left" if h in ["Category", "Fund Name"] else "right"
-            html_table.append(f"    <td style='padding: 6px; text-align: {align};'>{str(val).strip()}</td>")
+            html_table.append(f"    <td style='padding: 10px 15px; text-align: center; border: 1px solid #e2e8f0; color: #334155;'>{str(val).strip()}</td>")
         html_table.append("  </tr>")
         
     html_table.append("</table>")
@@ -175,8 +195,8 @@ def build_email_html(data: List[Dict], headers: List[str], report_date: str) -> 
   <meta charset="utf-8">
   <title>AL Habib MUFAP Rates</title>
 </head>
-<body style="margin: 0; padding: 20px; background-color: #f7fafc; font-family: Arial, sans-serif;">
-  <div style="max-width: 900px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 4px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);">
+<body style="margin: 0; padding: 20px; background-color: #f7fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+  <div style="max-width: 900px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);">
     <div style="background-color: #1a365d; color: #ffffff; padding: 18px; font-size: 20px; font-weight: bold; text-align: center; letter-spacing: 0.5px;">
       🚨 NEW MUFAP AL HABIB RATES PUBLISHED
     </div>
@@ -184,13 +204,15 @@ def build_email_html(data: List[Dict], headers: List[str], report_date: str) -> 
       <div style="font-size: 14px; color: #718096; margin-bottom: 5px; font-weight: bold; text-transform: uppercase;">
         Report: MUFAP Daily Rates — AL Habib Funds
       </div>
-      <div style="font-size: 14px; color: #718096; margin-bottom: 15px; font-weight: bold; text-transform: uppercase;">
+      <div style="font-size: 14px; color: #718096; margin-bottom: 25px; font-weight: bold; text-transform: uppercase;">
         Rates Date: {report_date}
       </div>
       
-      {html_table_str}
+      <div style="overflow-x: auto; max-width: 100%; border-radius: 4px; padding-bottom: 10px;">
+        {html_table_str}
+      </div>
       
-      <div style="margin-top: 25px; font-size: 11px; color: #a0aec0; line-height: 1.4; border-top: 1px solid #edf2f7; padding-top: 12px; font-style: italic;">
+      <div style="margin-top: 30px; font-size: 11px; color: #a0aec0; line-height: 1.5; border-top: 1px solid #edf2f7; padding-top: 15px; font-style: italic;">
         Disclaimer: This data has been extracted in real-time from the official MUFAP daily sheet. Please refer to the attached Excel file to verify any rates.<br><br>
         <strong>Source URL:</strong> <a href="{MUFAP_URL}" style="color: #3182ce; text-decoration: underline;">{MUFAP_URL}</a>
       </div>
@@ -291,12 +313,40 @@ def send_email(subject: str, html_body: str, attachment_path: str):
 
 def main():
     logging.info("Starting MUFAP AL Habib Pipeline...")
+    
+    # PKT Timezone configuration
+    pkt_zone = pytz.timezone("Asia/Karachi")
+    now_pkt = datetime.now(pkt_zone)
+    today_str = now_pkt.strftime("%d-%b-%Y")
+    
+    state_file = "state.json"
+    force_send = os.getenv("FORCE_SEND", "false").lower() in ("true", "1", "yes")
+    
+    # State tracking: Avoid double-emailing (unless FORCE_SEND is enabled for testing)
+    if os.path.exists(state_file) and not force_send:
+        try:
+            with open(state_file, "r") as f:
+                state = json.load(f)
+                if state.get("last_run_date") == today_str:
+                    logging.info(f"Already processed MUFAP emails for today ({today_str}). Exiting.")
+                    sys.exit(0)
+        except Exception as e:
+            logging.warning(f"Could not read {state_file}: {e}")
+    elif force_send:
+        logging.info("FORCE_SEND is enabled: Bypassing already-sent check for testing.")
 
     html_content = fetch_mufap_page(MUFAP_URL)
     soup = BeautifulSoup(html_content, "html.parser")
 
     report_date = extract_report_date(soup)
     logging.info(f"MUFAP Live Report Date: {report_date}")
+    
+    # Strict Date Checking (unless FORCE_SEND is enabled for testing)
+    if report_date != today_str and not force_send:
+        logging.warning(f"MUFAP report date ({report_date}) does not match today's date ({today_str}). The site hasn't updated yet. Exiting.")
+        sys.exit(0)
+    elif report_date != today_str and force_send:
+        logging.info(f"FORCE_SEND is enabled: Processing latest MUFAP report ({report_date}) even though today is {today_str}.")
 
     data_rows, headers = parse_mufap_table(soup, keyword="AL Habib")
     logging.info(f"Extracted {len(data_rows)} AL Habib funds.")
@@ -314,6 +364,14 @@ def main():
     subject = f"MUFAP Daily Performance Report — AL Habib Funds ({report_date})"
     send_email(subject, email_html, excel_file)
     logging.info("Pipeline completed & email sent successfully!")
+    
+    # Update State
+    try:
+        with open(state_file, "w") as f:
+            json.dump({"last_run_date": today_str}, f)
+        logging.info("Updated state.json.")
+    except Exception as e:
+        logging.error(f"Failed to update state.json: {e}")
 
 
 if __name__ == "__main__":
